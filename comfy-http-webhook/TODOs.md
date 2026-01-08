@@ -2,558 +2,608 @@
 
 This document provides a comprehensive, prioritized checklist for implementing the HTTP webhook node system from zero to production.
 
+**Key Design Principles:**
+- **Multipart-First**: ALL outputs sent as multipart/form-data
+- **Universal Output Interception**: Works with ANY output node (built-in + custom)
+- **Comprehensive Inputs**: Text, images (multiple), audio, video, masks, JSON, embeddings
+- **Non-Blocking**: All HTTP operations are async
+- **Zero-Config Outputs**: No need to replace output nodes
+
 ---
 
 ## Phase 1: Project Setup & Foundation
 
 ### 1.1 Project Structure
-- [ ] Create `custom_nodes/comfy-http-webhook/` directory
+- [ ] Create `comfy-http-webhook/` directory at repo root
 - [ ] Create `__init__.py` with `NODE_CLASS_MAPPINGS` and `NODE_DISPLAY_NAME_MAPPINGS`
-- [ ] Create `requirements.txt` with dependencies
+- [ ] Create `requirements.txt` with dependencies (aiohttp>=3.8.0)
 - [ ] Create `.gitignore` for Python projects
 - [ ] Create `README.md` with basic documentation
-- [ ] Set up `pyproject.toml` for proper packaging (optional)
+- [ ] Create `pyproject.toml` for proper packaging (optional)
 
 ### 1.2 Core Types & Data Structures
 - [ ] Create `core/types.py`
-  - [ ] Define `WebhookConfig` dataclass
+  - [ ] Define `WebhookContext` dataclass
+    - [ ] `callback_url: str`
+    - [ ] `request_id: str`
+    - [ ] `auth_header: Optional[str]`
+    - [ ] `auth_value: Optional[str]`
+    - [ ] `send_progress: bool`
+    - [ ] `timeout: int`
+    - [ ] `max_retries: int`
+    - [ ] `inputs: dict`
+    - [ ] `prompt_id: str`
   - [ ] Define `WebhookResult` dataclass
-  - [ ] Define `OutputData` dataclass
-  - [ ] Define `WebhookEvent` enum (started, progress, output, completed, error)
-  - [ ] Define `OutputType` enum (image, audio, video, mesh, generic)
-  - [ ] Define `EncodingType` enum (base64, url, multipart)
+  - [ ] Define `OutputInfo` dataclass
+    - [ ] `type: str` (image, audio, video, mesh, text, latent, unknown)
+    - [ ] `filename: Optional[str]`
+    - [ ] `subfolder: Optional[str]`
+    - [ ] `folder_type: Optional[str]`
+    - [ ] `mime_type: str`
+    - [ ] `inline_content: Optional[str]`
+    - [ ] `to_dict() -> dict` method
+  - [ ] Define `WebhookEvent` enum (started, progress, output_ready, output_batch, completed, error, interrupted)
 
 ### 1.3 Utility Functions
 - [ ] Create `utils/validation.py`
   - [ ] Implement `validate_url(url: str) -> bool`
-  - [ ] Implement `validate_json_string(s: str) -> dict`
   - [ ] Implement `sanitize_for_logging(data: dict) -> dict`
   - [ ] Add URL scheme validation (http/https only)
   - [ ] Add optional private IP blocking
-- [ ] Create `utils/encoding.py`
-  - [ ] Implement `to_base64(data: bytes) -> str`
-  - [ ] Implement `from_base64(s: str) -> bytes`
-  - [ ] Implement `generate_request_id() -> str`
-  - [ ] Implement `get_iso_timestamp() -> str`
+- [ ] Create `utils/mime.py`
+  - [ ] Implement `guess_mime_type(filename: str) -> str`
+  - [ ] Define MIME type mappings for all supported formats
 - [ ] Create `utils/logging.py`
   - [ ] Set up structured logging for webhook operations
-  - [ ] Implement log rotation (if needed)
   - [ ] Add debug mode toggle
 
 ---
 
-## Phase 2: HTTP Client Implementation
+## Phase 2: Input Processing System
 
-### 2.1 Core Client
+### 2.1 Input Processor Core
+- [ ] Create `processors/inputs.py`
+  - [ ] Implement `WebhookInputProcessor` class
+    - [ ] `async process_inputs(webhook_inputs: dict) -> dict`
+    - [ ] `_is_base64_image(value: str) -> bool`
+    - [ ] `_is_base64_audio(value: str) -> bool`
+    - [ ] `_is_url(value: str) -> bool`
+    - [ ] `_is_image_data(value: str) -> bool`
+
+### 2.2 Image Input Processing
+- [ ] Implement `async _decode_base64_image(data: str) -> torch.Tensor`
+  - [ ] Handle data URL prefix stripping (`data:image/png;base64,...`)
+  - [ ] Support PNG, JPEG, WebP formats
+  - [ ] Handle EXIF orientation via `ImageOps.exif_transpose`
+  - [ ] Convert to RGB mode
+  - [ ] Convert to tensor [1, H, W, C] with values 0-1
+- [ ] Implement `async _download_and_decode(url: str) -> torch.Tensor`
+  - [ ] Async download with aiohttp
+  - [ ] Timeout handling (30s default)
+  - [ ] Same decoding as base64
+
+### 2.3 Multiple Images (Array Input)
+- [ ] Implement `async _process_array(items: list) -> Union[torch.Tensor, list]`
+  - [ ] Detect if all items are images
+  - [ ] Process each image (base64 or URL)
+  - [ ] Stack into batch tensor [N, H, W, C]
+- [ ] Handle mixed-size images
+  - [ ] Implement `batch_images_mixed_sizes()` with padding
+
+### 2.4 Audio Input Processing
+- [ ] Implement `async _decode_base64_audio(data: str) -> dict`
+  - [ ] Handle data URL prefix stripping
+  - [ ] Support WAV, MP3, FLAC, OGG formats
+  - [ ] Return `{"waveform": tensor, "sample_rate": int}` format
+  - [ ] Resample to 44100 Hz if needed
+
+### 2.5 Video Input Processing
+- [ ] Implement `async _decode_video(data: str) -> VIDEO`
+  - [ ] Handle base64 video data
+  - [ ] Handle video URLs
+  - [ ] Extract frames using av or decord
+  - [ ] Return VIDEO type tensor
+
+### 2.6 Mask Input Processing
+- [ ] Implement `async _decode_mask(data: str) -> torch.Tensor`
+  - [ ] Decode image (base64 or URL)
+  - [ ] Convert to grayscale
+  - [ ] Return MASK tensor [1, H, W]
+
+### 2.7 Other Input Types
+- [ ] Implement JSON data handling (dict → serialized string)
+- [ ] Implement passthrough for:
+  - [ ] Plain strings
+  - [ ] Integers
+  - [ ] Floats
+  - [ ] Booleans
+  - [ ] Model references (checkpoint, lora, embedding names)
+
+### 2.8 Input Processing Tests
+- [ ] Create `tests/test_inputs.py`
+  - [ ] Test base64 PNG image decode
+  - [ ] Test base64 JPEG image decode
+  - [ ] Test URL image download and decode
+  - [ ] Test multiple images batching
+  - [ ] Test mixed-size images batching
+  - [ ] Test base64 audio decode
+  - [ ] Test audio URL download
+  - [ ] Test mask decode
+  - [ ] Test JSON serialization
+  - [ ] Test passthrough types
+
+---
+
+## Phase 3: Output Detection System
+
+### 3.1 Output Detection
+- [ ] Create `processors/outputs.py`
+  - [ ] Implement `detect_output_type(ui_output: dict) -> list[OutputInfo]`
+  - [ ] Handle `{"images": [{filename, subfolder, type}, ...]}` pattern
+  - [ ] Handle `{"audio": [{filename, subfolder, type}, ...]}` pattern
+  - [ ] Handle `{"video": [{filename, subfolder, type}, ...]}` pattern
+  - [ ] Handle `{"3d": [{filename, subfolder, type}, ...]}` pattern
+  - [ ] Handle `{"latents": [{filename, subfolder, type}, ...]}` pattern
+  - [ ] Handle `{"text": (value,)}` pattern (tuple)
+  - [ ] Handle `{"result": [...]}` pattern (3D preview)
+  - [ ] Handle unknown patterns with fallback
+
+### 3.2 File Path Resolution
+- [ ] Implement `get_output_path(filename, subfolder, folder_type) -> str`
+  - [ ] Handle "output" folder type
+  - [ ] Handle "temp" folder type
+  - [ ] Handle "input" folder type
+  - [ ] Resolve absolute paths correctly
+
+### 3.3 MIME Type Detection
+- [ ] Implement comprehensive MIME type mapping
+  - [ ] `.png` → `image/png`
+  - [ ] `.jpg`, `.jpeg` → `image/jpeg`
+  - [ ] `.webp` → `image/webp`
+  - [ ] `.flac` → `audio/flac`
+  - [ ] `.mp3` → `audio/mpeg`
+  - [ ] `.wav` → `audio/wav`
+  - [ ] `.opus`, `.ogg` → `audio/ogg`
+  - [ ] `.mp4` → `video/mp4`
+  - [ ] `.webm` → `video/webm`
+  - [ ] `.glb` → `model/gltf-binary`
+  - [ ] `.obj` → `text/plain`
+  - [ ] `.latent` → `application/octet-stream`
+
+### 3.4 Output Detection Tests
+- [ ] Create `tests/test_outputs.py`
+  - [ ] Test image output detection
+  - [ ] Test audio output detection
+  - [ ] Test video output detection
+  - [ ] Test 3D mesh output detection
+  - [ ] Test latent output detection
+  - [ ] Test text output detection
+  - [ ] Test 3D preview (result) detection
+  - [ ] Test unknown format fallback
+  - [ ] Test multiple outputs from single node
+
+---
+
+## Phase 4: HTTP Client Implementation
+
+### 4.1 Multipart Client Core
 - [ ] Create `core/client.py`
   - [ ] Implement `WebhookClient` class
-    - [ ] `__init__` with configuration parameters
-    - [ ] `async get_session() -> aiohttp.ClientSession` (lazy initialization)
+    - [ ] `__init__(timeout, max_retries, base_delay, max_delay, jitter_factor)`
+    - [ ] `async get_session() -> aiohttp.ClientSession` (lazy init)
     - [ ] `async close()` for cleanup
-    - [ ] `async send_webhook(url, payload, headers) -> WebhookResult`
-    - [ ] `async send_multipart(url, payload, files, headers) -> WebhookResult`
 
-### 2.2 Retry Logic
-- [ ] Implement exponential backoff in `client.py`
-  - [ ] `_calculate_delay(attempt: int) -> float` with jitter
-  - [ ] `async _execute_with_retry(request_func) -> WebhookResult`
-  - [ ] Define retryable status codes (408, 429, 500, 502, 503, 504)
-  - [ ] Define non-retryable status codes (400, 401, 403, 404, 422)
-  - [ ] Handle `aiohttp.ClientError` exceptions
-  - [ ] Handle `asyncio.TimeoutError`
-  - [ ] Log retry attempts with timing info
+### 4.2 Session Management
+- [ ] Implement connection pooling
+  - [ ] `TCPConnector(limit=10, limit_per_host=5, keepalive_timeout=30)`
+- [ ] Implement proper session lifecycle
+- [ ] Handle session recreation on close
 
-### 2.3 Circuit Breaker
-- [ ] Create `core/circuit_breaker.py`
-  - [ ] Implement `CircuitState` enum (CLOSED, OPEN, HALF_OPEN)
-  - [ ] Implement `CircuitBreaker` class
-    - [ ] `__init__` with failure threshold and recovery timeout
-    - [ ] `can_execute() -> bool`
-    - [ ] `record_success()`
-    - [ ] `record_failure()`
-    - [ ] `_check_recovery()` for state transitions
-  - [ ] Add per-URL circuit breakers
-  - [ ] Add circuit breaker metrics/stats
+### 4.3 JSON Requests
+- [ ] Implement `async send_json(url, payload, headers) -> WebhookResult`
+  - [ ] For progress events, errors
 
-### 2.4 Client Tests
+### 4.4 Multipart Requests (In-Memory)
+- [ ] Implement `async send_multipart(url, metadata, files, headers) -> WebhookResult`
+  - [ ] Build `aiohttp.FormData`
+  - [ ] Add metadata as JSON part with `content_type="application/json"`
+  - [ ] Add files with proper `filename` and `content_type`
+  - [ ] Files: `list[tuple[name, filename, bytes, mime_type]]`
+
+### 4.5 Multipart Requests (Streaming)
+- [ ] Implement `async send_multipart_streaming(url, metadata, file_paths, headers)`
+  - [ ] Use `aiohttp.MultipartWriter` for disk streaming
+  - [ ] Use `aiohttp.payload.FilePayload` for each file
+  - [ ] For files > 50MB threshold
+
+### 4.6 Retry Logic
+- [ ] Implement `async _execute_with_retry(request_func) -> WebhookResult`
+- [ ] Implement `_calculate_delay(attempt) -> float`
+  - [ ] Exponential: `base_delay * (2 ** (attempt - 1))`
+  - [ ] Cap at `max_delay`
+  - [ ] Add jitter: `delay * jitter_factor * (random * 2 - 1)`
+- [ ] Define retryable status codes: 408, 429, 500, 502, 503, 504
+- [ ] Define non-retryable status codes: 400, 401, 403, 404, 422
+- [ ] Handle `aiohttp.ClientError` exceptions
+- [ ] Handle `asyncio.TimeoutError`
+- [ ] Log retry attempts
+
+### 4.7 Client Tests
 - [ ] Create `tests/test_client.py`
-  - [ ] Test successful webhook delivery
-  - [ ] Test retry on server errors (500, 502, 503)
-  - [ ] Test no retry on client errors (400, 404)
+  - [ ] Test successful JSON delivery
+  - [ ] Test successful multipart delivery
+  - [ ] Test retry on 500 errors
+  - [ ] Test retry on 503 errors
+  - [ ] Test no retry on 400 errors
   - [ ] Test exponential backoff timing
   - [ ] Test jitter randomization
   - [ ] Test timeout handling
   - [ ] Test connection error handling
-  - [ ] Test circuit breaker activation
-  - [ ] Test circuit breaker recovery
   - [ ] Test session reuse
+  - [ ] Test streaming multipart
 
 ---
 
-## Phase 3: Payload Building
+## Phase 5: Output Interception System
 
-### 3.1 Payload Builders
-- [ ] Create `core/payloads.py`
-  - [ ] Implement `build_base_payload(event, request_id, prompt_id) -> dict`
-  - [ ] Implement `build_started_payload(config, prompt_id) -> dict`
-  - [ ] Implement `build_progress_payload(config, prompt_id, progress_info) -> dict`
-  - [ ] Implement `build_output_payload(config, prompt_id, output_data) -> dict`
-  - [ ] Implement `build_completed_payload(config, prompt_id, stats) -> dict`
-  - [ ] Implement `build_error_payload(config, prompt_id, error_info) -> dict`
-  - [ ] Implement `build_interrupted_payload(config, prompt_id, partial_results) -> dict`
+### 5.1 Interceptor Core
+- [ ] Create `core/interceptor.py`
+  - [ ] Store `_original_task_done` global
+  - [ ] Implement `install_output_interceptor()`
+  - [ ] Implement `_intercepted_task_done(self, item_id, history_result, status, process_item)`
 
-### 3.2 Payload Validation
-- [ ] Add payload size checking
-- [ ] Add payload schema validation (optional, with pydantic)
-- [ ] Add compression for large payloads (optional)
+### 5.2 Context Registry
+- [ ] Implement `_webhook_contexts: dict[str, WebhookContext]` registry
+- [ ] Implement `register_webhook_context(context)`
+- [ ] Implement `get_webhook_context(prompt_id) -> Optional[WebhookContext]`
+- [ ] Implement `unregister_webhook_context(prompt_id)`
+- [ ] Add cleanup on workflow completion
 
-### 3.3 Payload Tests
-- [ ] Create `tests/test_payloads.py`
-  - [ ] Test all payload builders produce valid JSON
-  - [ ] Test required fields are present
-  - [ ] Test timestamp format is ISO8601
-  - [ ] Test payload size limits
+### 5.3 Output Processing
+- [ ] Implement `async _send_webhook_outputs(webhook_config, prompt_id, outputs, status)`
+  - [ ] Iterate all output nodes in `outputs` dict
+  - [ ] Call `detect_output_type()` for each node's UI output
+  - [ ] Read files from disk using `get_output_path()`
+  - [ ] Build metadata payload
+  - [ ] Build files list
+  - [ ] Send via `client.send_multipart()`
 
----
+### 5.4 Auth Header Construction
+- [ ] Implement `_get_auth_headers(webhook_config) -> dict`
+  - [ ] Handle `auth_header` + `auth_value` from config
+  - [ ] Support Bearer tokens
+  - [ ] Support API keys
 
-## Phase 4: Output Processors
+### 5.5 Interceptor Installation
+- [ ] Update `__init__.py` to call `install_output_interceptor()` on load
+- [ ] Ensure interceptor survives ComfyUI reloads
+- [ ] Add uninstall capability for testing
 
-### 4.1 Image Processor
-- [ ] Create `processors/image.py`
-  - [ ] Implement `process_image(tensor, format, quality) -> bytes`
-  - [ ] Support PNG format (lossless)
-  - [ ] Support JPEG format (lossy with quality setting)
-  - [ ] Support WebP format (modern, configurable)
-  - [ ] Handle batch images (multiple tensors)
-  - [ ] Extract image dimensions
-  - [ ] Handle different tensor formats (BCHW, BHWC)
-  - [ ] Implement metadata embedding for PNG
-  - [ ] Implement `ImageOutputData` dataclass
-
-### 4.2 Audio Processor
-- [ ] Create `processors/audio.py`
-  - [ ] Implement `process_audio(audio_dict, format) -> bytes`
-  - [ ] Support FLAC format (lossless)
-  - [ ] Support MP3 format (with quality options)
-  - [ ] Support Opus format (efficient)
-  - [ ] Support WAV format (uncompressed)
-  - [ ] Extract sample rate, channels, duration
-  - [ ] Handle stereo/mono conversion if needed
-  - [ ] Implement `AudioOutputData` dataclass
-
-### 4.3 Video Processor
-- [ ] Create `processors/video.py`
-  - [ ] Implement `process_video(frames, format, fps) -> bytes`
-  - [ ] Support WebM format (VP9 codec)
-  - [ ] Support MP4 format (H.264 codec) - optional, requires additional libs
-  - [ ] Handle frame tensor conversion
-  - [ ] Calculate duration from frame count and fps
-  - [ ] Implement `VideoOutputData` dataclass
-  - [ ] Add progress callback for long videos
-
-### 4.4 Mesh Processor
-- [ ] Create `processors/mesh.py`
-  - [ ] Implement `process_mesh(mesh_data, format) -> bytes`
-  - [ ] Support GLB format (binary glTF)
-  - [ ] Support OBJ format (optional)
-  - [ ] Extract vertex/face counts
-  - [ ] Handle texture data if present
-  - [ ] Implement `MeshOutputData` dataclass
-
-### 4.5 Generic Processor
-- [ ] Create `processors/generic.py`
-  - [ ] Implement `process_generic(data, output_name) -> dict`
-  - [ ] Handle JSON-serializable types
-  - [ ] Handle torch tensors (convert to lists)
-  - [ ] Handle numpy arrays
-  - [ ] Add type detection and appropriate serialization
-
-### 4.6 Processor Tests
-- [ ] Create `tests/test_processors.py`
-  - [ ] Test image processing for all formats
-  - [ ] Test audio processing for all formats
-  - [ ] Test video processing
-  - [ ] Test mesh processing
-  - [ ] Test generic data serialization
-  - [ ] Test batch handling
-  - [ ] Test error handling for invalid inputs
+### 5.6 Interceptor Tests
+- [ ] Create `tests/test_interceptor.py`
+  - [ ] Test interceptor installation
+  - [ ] Test context registration
+  - [ ] Test output capture from SaveImage
+  - [ ] Test output capture from SaveAudio
+  - [ ] Test output capture from custom nodes
+  - [ ] Test multipart building
+  - [ ] Test webhook sending on task_done
 
 ---
 
-## Phase 5: ComfyUI Nodes
+## Phase 6: ComfyUI Nodes
 
-### 5.1 WebhookConfig Node
-- [ ] Create `nodes/config_node.py`
-  - [ ] Implement `WebhookConfig` class
-    - [ ] Define `INPUT_TYPES` with all config options
-    - [ ] Define `RETURN_TYPES = ("WEBHOOK_CONFIG",)`
-    - [ ] Define `FUNCTION = "create_config"`
-    - [ ] Define `CATEGORY = "webhook"`
-    - [ ] Implement `create_config()` method
-  - [ ] Validate callback_url on creation
-  - [ ] Generate request_id if not provided
-  - [ ] Parse custom_metadata JSON
-  - [ ] Store config in execution context for access by output nodes
+### 6.1 WebhookReceiver Node
+- [ ] Create `nodes/receiver.py`
+  - [ ] Implement `WebhookReceiver` class
+    - [ ] `INPUT_TYPES` with optional defaults
+    - [ ] Hidden inputs: `PROMPT`, `EXTRA_PNGINFO`, `UNIQUE_ID`
+    - [ ] `RETURN_TYPES = ("WEBHOOK_CONTEXT",)`
+    - [ ] `FUNCTION = "receive"`
+    - [ ] `CATEGORY = "webhook"`
+  - [ ] Extract `webhook_config` from `extra_pnginfo`
+  - [ ] Extract `webhook_inputs` from `extra_pnginfo`
+  - [ ] Build `WebhookContext`
+  - [ ] Call `register_webhook_context(context)`
 
-### 5.2 WebhookVariable Nodes
-- [ ] Create `nodes/variable_nodes.py`
-  - [ ] Implement `WebhookStringVariable` class
-    - [ ] Access `extra_data.webhook_variables` via hidden PROMPT input
-    - [ ] Return default_value if variable not found
-  - [ ] Implement `WebhookIntVariable` class
-    - [ ] Add min/max validation
-  - [ ] Implement `WebhookFloatVariable` class
-    - [ ] Add min/max/step validation
-  - [ ] Implement `WebhookBooleanVariable` class
-  - [ ] Implement `WebhookImageVariable` class
-    - [ ] Handle base64 image input
-    - [ ] Handle URL image input (download)
-    - [ ] Convert to IMAGE tensor
-  - [ ] Implement `WebhookSeedVariable` class
-    - [ ] Handle -1 for random seed
+### 6.2 WebhookInput Nodes - Text
+- [ ] Create `nodes/inputs.py`
+  - [ ] Implement `WebhookTextInput` class
+    - [ ] Extract single string from context inputs
+    - [ ] Support default value
+  - [ ] Implement `WebhookTextsInput` class
+    - [ ] Extract string array from context inputs
+    - [ ] `OUTPUT_IS_LIST = (True,)`
 
-### 5.3 WebhookOutput Nodes
-- [ ] Create `nodes/output_nodes.py`
-  - [ ] Implement `WebhookImageOutput` class
-    - [ ] Define `OUTPUT_NODE = True`
-    - [ ] Accept IMAGE and WEBHOOK_CONFIG inputs
-    - [ ] Process images using image processor
-    - [ ] Send to webhook endpoint
-    - [ ] Also save locally (standard behavior)
-    - [ ] Return UI data for frontend
-  - [ ] Implement `WebhookAudioOutput` class
-    - [ ] Same pattern as image output
-  - [ ] Implement `WebhookVideoOutput` class
-    - [ ] Handle frame sequences
-    - [ ] Handle VIDEO type if available
-  - [ ] Implement `WebhookMeshOutput` class
-    - [ ] Handle MESH type
-  - [ ] Implement `WebhookGenericOutput` class
-    - [ ] Handle ANY type
+### 6.3 WebhookInput Nodes - Numeric
+- [ ] Implement `WebhookIntInput` class
+  - [ ] Extract integer with default
+  - [ ] Convert to int
+- [ ] Implement `WebhookFloatInput` class
+  - [ ] Extract float with default
+  - [ ] Convert to float
+- [ ] Implement `WebhookBoolInput` class
+  - [ ] Extract boolean with default
+  - [ ] Convert to bool
 
-### 5.4 WebhookProgress Node (Optional)
-- [ ] Create `nodes/progress_node.py`
-  - [ ] Implement `WebhookProgressUpdate` class
-    - [ ] Send custom progress message
-    - [ ] Pass through input for execution order
-    - [ ] Non-blocking async send
+### 6.4 WebhookInput Nodes - Images
+- [ ] Implement `WebhookImageInput` class
+  - [ ] Extract single image (base64 or URL)
+  - [ ] Return `IMAGE` tensor
+  - [ ] Handle missing input (return empty tensor)
+- [ ] Implement `WebhookImagesInput` class
+  - [ ] Extract image array
+  - [ ] Batch into single tensor [N, H, W, C]
+  - [ ] Handle mixed base64/URL
 
-### 5.5 Node Registration
+### 6.5 WebhookInput Nodes - Media
+- [ ] Implement `WebhookAudioInput` class
+  - [ ] Extract audio (base64 or URL)
+  - [ ] Return `AUDIO` dict
+- [ ] Implement `WebhookVideoInput` class
+  - [ ] Extract video (base64 or URL)
+  - [ ] Return `VIDEO` type
+- [ ] Implement `WebhookMaskInput` class
+  - [ ] Extract mask image
+  - [ ] Return `MASK` tensor
+
+### 6.6 WebhookInput Nodes - Data
+- [ ] Implement `WebhookJSONInput` class
+  - [ ] Extract JSON dict, serialize to string
+
+### 6.7 WebhookSend Node (Manual Output)
+- [ ] Create `nodes/send.py`
+  - [ ] Implement `WebhookSend` class
+    - [ ] `OUTPUT_NODE = True`
+    - [ ] Accept `WEBHOOK_CONTEXT` + optional images/audio/video/text/data
+    - [ ] Process outputs and send via client
+    - [ ] Return empty dict (output node)
+
+### 6.8 Node Registration
 - [ ] Update `__init__.py`
   - [ ] Import all node classes
-  - [ ] Populate `NODE_CLASS_MAPPINGS`
-  - [ ] Populate `NODE_DISPLAY_NAME_MAPPINGS`
-  - [ ] Add `WEB_DIRECTORY` if frontend components needed
+  - [ ] Populate `NODE_CLASS_MAPPINGS` dict
+  - [ ] Populate `NODE_DISPLAY_NAME_MAPPINGS` dict
+  - [ ] Set `CATEGORY` for organization
 
-### 5.6 Node Tests
+### 6.9 Node Tests
 - [ ] Create `tests/test_nodes.py`
-  - [ ] Test WebhookConfig creates valid config
-  - [ ] Test WebhookVariable nodes extract values
-  - [ ] Test WebhookVariable nodes use defaults
-  - [ ] Test WebhookOutput nodes process outputs
-  - [ ] Test WebhookOutput nodes call webhook
-  - [ ] Test node integration (config → output)
+  - [ ] Test WebhookReceiver extracts config
+  - [ ] Test WebhookReceiver extracts inputs
+  - [ ] Test WebhookTextInput extraction
+  - [ ] Test WebhookTextsInput extraction (list)
+  - [ ] Test WebhookIntInput extraction
+  - [ ] Test WebhookFloatInput extraction
+  - [ ] Test WebhookImageInput extraction
+  - [ ] Test WebhookImagesInput batching
+  - [ ] Test WebhookAudioInput extraction
+  - [ ] Test WebhookMaskInput extraction
+  - [ ] Test WebhookSend multipart output
 
 ---
 
-## Phase 6: Execution Integration
+## Phase 7: Event System
 
-### 6.1 Output Coordinator
-- [ ] Create `core/coordinator.py`
-  - [ ] Implement `OutputCoordinator` class
-    - [ ] Track total expected outputs
-    - [ ] Track completed outputs
-    - [ ] Store output results
-    - [ ] Send completion event when all done
-    - [ ] Handle partial completion (interruption)
-  - [ ] Implement coordinator registry (per prompt_id)
-  - [ ] Add cleanup for completed/failed workflows
+### 7.1 Event Payloads
+- [ ] Create `core/events.py`
+  - [ ] Implement `build_started_payload(context) -> dict`
+  - [ ] Implement `build_progress_payload(context, node_id, node_type, progress, message) -> dict`
+  - [ ] Implement `build_output_ready_payload(context, output_info) -> dict`
+  - [ ] Implement `build_batch_payload(context, outputs, status) -> dict`
+  - [ ] Implement `build_error_payload(context, error) -> dict`
+  - [ ] Implement `build_completed_payload(context, stats) -> dict`
 
-### 6.2 Progress Integration
+### 7.2 Progress Integration
 - [ ] Hook into ComfyUI progress system
-  - [ ] Create custom progress handler for webhooks
-  - [ ] Implement progress throttling (configurable interval)
-  - [ ] Forward progress updates to webhook
-  - [ ] Include node info in progress updates
+- [ ] Throttle progress updates (configurable interval_ms)
+- [ ] Send progress events to webhook
 
-### 6.3 Error Handling Integration
-- [ ] Create `core/error_handler.py`
-  - [ ] Implement `WebhookErrorHandler` class
-  - [ ] Hook into execution error events
-  - [ ] Format error info for webhook
-  - [ ] Send error event on execution failure
-  - [ ] Continue local execution even if webhook fails
-
-### 6.4 Lifecycle Events
-- [ ] Implement workflow started event
-  - [ ] Hook into execution start
-  - [ ] Send started event with workflow info
-- [ ] Implement workflow completed event
-  - [ ] Track execution time
-  - [ ] Aggregate output statistics
-  - [ ] Send completed event
-- [ ] Implement workflow interrupted event
-  - [ ] Hook into interrupt signal
-  - [ ] Send interrupted event with partial results
+### 7.3 Lifecycle Events
+- [ ] Send `workflow.started` on execution begin
+- [ ] Send `workflow.completed` on success
+- [ ] Send `workflow.error` on failure
+- [ ] Send `workflow.interrupted` on cancel
 
 ---
 
-## Phase 7: Advanced Features
+## Phase 8: Advanced Features
 
-### 7.1 Delivery Queue (For Failed Webhooks)
+### 8.1 Circuit Breaker (Optional)
+- [ ] Create `core/circuit_breaker.py`
+  - [ ] Implement `CircuitState` enum (CLOSED, OPEN, HALF_OPEN)
+  - [ ] Implement `CircuitBreaker` class
+  - [ ] Per-URL circuit breakers
+  - [ ] Failure threshold and recovery timeout
+
+### 8.2 Delivery Queue (Optional)
 - [ ] Create `core/delivery_queue.py`
-  - [ ] Implement persistent queue (file-based or SQLite)
-  - [ ] Store failed webhook deliveries
+  - [ ] Persistent queue for failed deliveries
   - [ ] Background retry task
-  - [ ] Maximum retry limit
-  - [ ] Dead letter queue for permanent failures
-  - [ ] Queue statistics/monitoring
+  - [ ] Dead letter queue
 
-### 7.2 Request Batching
-- [ ] Implement output batching for efficiency
-  - [ ] Collect multiple outputs
-  - [ ] Send as single batch request
-  - [ ] Configurable batch size/timeout
-  - [ ] Fall back to individual sends on failure
+### 8.3 Webhook Signature (Optional)
+- [ ] Implement HMAC-SHA256 signature
+- [ ] Add signature to `X-Webhook-Signature` header
+- [ ] Document verification on receiver side
 
-### 7.3 Streaming Support (Optional)
-- [ ] Implement chunked transfer for large files
-  - [ ] Split large payloads into chunks
-  - [ ] Send with proper headers
-  - [ ] Handle reassembly on receiver side
-
-### 7.4 Webhook Signature
-- [ ] Implement HMAC signature for webhook verification
-  - [ ] Add secret key to config
-  - [ ] Sign payloads with SHA-256
-  - [ ] Add signature to headers
-  - [ ] Document verification on receiver side
-
-### 7.5 Metrics & Monitoring
-- [ ] Add metrics collection
-  - [ ] Request count (success/failure)
-  - [ ] Request latency
-  - [ ] Retry count
-  - [ ] Circuit breaker state changes
-  - [ ] Queue depth
-- [ ] Expose metrics endpoint (optional)
-- [ ] Add logging for all webhook operations
+### 8.4 Metrics (Optional)
+- [ ] Track request counts (success/failure)
+- [ ] Track latency
+- [ ] Track retry counts
 
 ---
 
-## Phase 8: Testing
+## Phase 9: Testing
 
-### 8.1 Mock Webhook Server
+### 9.1 Mock Webhook Server
 - [ ] Create `tests/mock_server.py`
-  - [ ] Implement async test server
+  - [ ] Async test server (aiohttp)
   - [ ] Record received requests
   - [ ] Configurable response delays
   - [ ] Configurable error responses
-  - [ ] Support for all event types
+  - [ ] Verify multipart structure
 
-### 8.2 Unit Tests
-- [ ] Test all utility functions
-- [ ] Test all processors
-- [ ] Test client with mocked aiohttp
-- [ ] Test circuit breaker state machine
+### 9.2 Unit Tests
+- [ ] Test all input processors
+- [ ] Test all output detectors
+- [ ] Test HTTP client with mocked aiohttp
 - [ ] Test payload builders
-- [ ] Test coordinator logic
+- [ ] Test interceptor logic
 - [ ] Aim for >80% code coverage
 
-### 8.3 Integration Tests
+### 9.3 Integration Tests
 - [ ] Create `tests/test_integration.py`
   - [ ] Test full node graph execution
   - [ ] Test with mock webhook server
   - [ ] Test variable injection
   - [ ] Test multiple output nodes
-  - [ ] Test error scenarios
+  - [ ] Test custom node output capture
 
-### 8.4 End-to-End Tests
+### 9.4 End-to-End Tests
 - [ ] Create `tests/test_e2e.py`
   - [ ] Test via ComfyUI API
-  - [ ] Submit workflow with webhook config
+  - [ ] Submit workflow with webhook_config in extra_data
   - [ ] Verify all events received
-  - [ ] Verify payload structure
-  - [ ] Verify output data integrity
+  - [ ] Verify multipart payload structure
+  - [ ] Verify file integrity
 
-### 8.5 Performance Tests
-- [ ] Create `tests/test_performance.py`
-  - [ ] Test concurrent workflows
-  - [ ] Test large image batches
-  - [ ] Test rapid progress updates
-  - [ ] Test memory usage
-  - [ ] Establish performance baselines
-
-### 8.6 Failure Scenario Tests
+### 9.5 Failure Scenario Tests
 - [ ] Test webhook endpoint timeout
-- [ ] Test webhook endpoint errors (500)
+- [ ] Test webhook endpoint 500 errors
 - [ ] Test network disconnection
 - [ ] Test invalid URL handling
-- [ ] Test malformed payload handling
-- [ ] Test circuit breaker activation
+- [ ] Test very large files
 - [ ] Test recovery after failures
 
 ---
 
-## Phase 9: Documentation
+## Phase 10: Documentation
 
-### 9.1 README.md
+### 10.1 README.md
 - [ ] Write project overview
 - [ ] Add installation instructions
 - [ ] Add quick start guide
-- [ ] Add configuration reference
-- [ ] Add example workflows
+- [ ] Add example webhook request
+- [ ] Add example multipart response
 - [ ] Add troubleshooting section
-- [ ] Add FAQ
 
-### 9.2 API Documentation
-- [ ] Document webhook event types
-- [ ] Document payload schemas
-- [ ] Document all node inputs/outputs
-- [ ] Provide example payloads for each event
-- [ ] Document authentication options
+### 10.2 API Documentation
+- [ ] Document webhook_config schema
+- [ ] Document webhook_inputs schema
+- [ ] Document all event types
+- [ ] Document multipart payload structure
+- [ ] Provide example payloads
 
-### 9.3 Integration Guide
+### 10.3 Integration Guide
 - [ ] Write guide for receiving webhooks
-- [ ] Provide example receiver implementations
-  - [ ] Python (Flask/FastAPI)
-  - [ ] Node.js (Express)
-  - [ ] Go
-- [ ] Document webhook verification
-- [ ] Document retry handling on receiver side
+- [ ] Provide example receiver (Python/FastAPI)
+- [ ] Provide example receiver (Node.js/Express)
+- [ ] Document multipart parsing
 
-### 9.4 Code Documentation
+### 10.4 Code Documentation
 - [ ] Add docstrings to all public functions
 - [ ] Add type hints throughout
 - [ ] Add inline comments for complex logic
-- [ ] Generate API docs (optional, with Sphinx)
 
 ---
 
-## Phase 10: Production Readiness
+## Phase 11: Production Readiness
 
-### 10.1 Error Handling Review
+### 11.1 Error Handling Review
 - [ ] Review all exception handling
 - [ ] Ensure no unhandled exceptions crash ComfyUI
-- [ ] Add graceful degradation everywhere
+- [ ] Add graceful degradation
 - [ ] Verify error messages are helpful
 
-### 10.2 Security Review
+### 11.2 Security Review
 - [ ] Review URL validation
 - [ ] Review input sanitization
 - [ ] Ensure no sensitive data in logs
-- [ ] Review authentication handling
-- [ ] Add rate limiting if needed
 - [ ] Review for injection vulnerabilities
 
-### 10.3 Performance Review
-- [ ] Profile memory usage
-- [ ] Optimize large payload handling
-- [ ] Review async patterns for efficiency
+### 11.3 Performance Review
+- [ ] Profile memory usage for large batches
+- [ ] Optimize streaming for large files
 - [ ] Check for memory leaks
-- [ ] Optimize image encoding performance
+- [ ] Test concurrent workflows
 
-### 10.4 Compatibility Testing
+### 11.4 Compatibility Testing
 - [ ] Test with ComfyUI latest version
-- [ ] Test with ComfyUI older versions (if supporting)
 - [ ] Test on Windows
 - [ ] Test on Linux
 - [ ] Test on macOS
-- [ ] Test with Python 3.10
-- [ ] Test with Python 3.11
-- [ ] Test with Python 3.12
+- [ ] Test with Python 3.10, 3.11, 3.12
 
-### 10.5 Final Checklist
+### 11.5 Final Checklist
 - [ ] All tests passing
 - [ ] No critical security issues
 - [ ] Documentation complete
 - [ ] Examples working
-- [ ] Performance acceptable
 - [ ] Error handling robust
 - [ ] Logging appropriate
-- [ ] Code clean and maintainable
 
 ---
 
-## Phase 11: Release
+## Phase 12: Release
 
-### 11.1 Packaging
+### 12.1 Packaging
 - [ ] Finalize version number
 - [ ] Update changelog
 - [ ] Create release notes
 - [ ] Tag release in git
-- [ ] Create GitHub release
 
-### 11.2 Distribution
+### 12.2 Distribution
 - [ ] Submit to ComfyUI Manager registry (optional)
 - [ ] Create installation script if needed
 - [ ] Test clean installation
 
-### 11.3 Post-Release
+### 12.3 Post-Release
 - [ ] Monitor for issues
 - [ ] Respond to bug reports
-- [ ] Plan future improvements
 - [ ] Gather user feedback
 
 ---
 
 ## Priority Order
 
-### P0 - Core Functionality (Must Have)
-1. Project structure setup
-2. HTTP client with retry logic
-3. WebhookConfig node
-4. WebhookImageOutput node
-5. Basic payload building
-6. Error handling
+### P0 - Core (Must Have First)
+1. Project structure setup (Phase 1)
+2. Input processor core - text, int, float, bool (Phase 2.1, 2.7)
+3. Output detection - images, audio (Phase 3.1)
+4. HTTP client - multipart (Phase 4)
+5. Output interceptor (Phase 5)
+6. WebhookReceiver node (Phase 6.1)
+7. Basic input nodes - text, int, float (Phase 6.2, 6.3)
 
-### P1 - Essential Features
-1. Variable nodes (String, Int, Float)
-2. Progress updates
-3. Completion events
-4. Audio output support
-5. Unit tests for core
+### P1 - Essential
+1. Image input processing (Phase 2.2, 2.3)
+2. Audio input processing (Phase 2.4)
+3. WebhookImageInput node (Phase 6.4)
+4. WebhookAudioInput node (Phase 6.5)
+5. Progress events (Phase 7)
+6. Unit tests (Phase 9.2)
 
-### P2 - Important Features
-1. Circuit breaker
-2. Video output support
-3. 3D mesh output support
-4. Integration tests
-5. Documentation
+### P2 - Important
+1. Video input processing (Phase 2.5)
+2. Mask input processing (Phase 2.6)
+3. All output types detection (Phase 3)
+4. WebhookSend manual node (Phase 6.7)
+5. Integration tests (Phase 9.3)
+6. Documentation (Phase 10)
 
 ### P3 - Nice to Have
-1. Delivery queue
-2. Request batching
-3. Webhook signatures
-4. Metrics/monitoring
-5. Performance optimizations
-
----
-
-## Time Estimates (Rough)
-
-| Phase | Estimated Time |
-|-------|---------------|
-| Phase 1: Setup | 2-4 hours |
-| Phase 2: HTTP Client | 4-6 hours |
-| Phase 3: Payloads | 2-3 hours |
-| Phase 4: Processors | 6-8 hours |
-| Phase 5: Nodes | 6-8 hours |
-| Phase 6: Integration | 4-6 hours |
-| Phase 7: Advanced | 8-12 hours |
-| Phase 8: Testing | 8-12 hours |
-| Phase 9: Documentation | 4-6 hours |
-| Phase 10: Production | 4-6 hours |
-| Phase 11: Release | 2-4 hours |
-
-**Total: ~50-75 hours** for a complete, production-ready implementation.
+1. Streaming multipart for large files (Phase 4.5)
+2. Circuit breaker (Phase 8.1)
+3. Delivery queue (Phase 8.2)
+4. Webhook signatures (Phase 8.3)
+5. Metrics (Phase 8.4)
 
 ---
 
 ## Notes
 
 - Start with P0 items to get a working prototype
-- Iterate based on testing and feedback
-- Don't over-engineer early - add complexity as needed
-- Keep the core simple and extensible
+- Test frequently with real ComfyUI workflows
+- The interceptor is the key to universal output support
+- Keep multipart as the only output format for simplicity
 - Prioritize reliability over features
