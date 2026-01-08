@@ -4,6 +4,7 @@ A production-quality custom node package for ComfyUI that enables HTTP webhook i
 
 ## Features
 
+- **🚀 Zero-Config Mode** - Just add `webhook_config` to your API request, no workflow changes needed!
 - **Trigger workflows via HTTP** with dynamic variables (text, images, audio, video, masks)
 - **Real-time progress updates** sent to your webhook endpoint
 - **Multipart output delivery** for images, audio, video, and 3D meshes
@@ -21,54 +22,65 @@ pip install -r comfy-http-webhook/requirements.txt
 
 ## Quick Start
 
-### 1. Add WebhookReceiver to Your Workflow
+### Option 1: Zero-Config Mode (Easiest!) ⭐
 
-The `WebhookReceiver` node is the entry point for webhook-triggered workflows. It extracts configuration and input variables from the API request.
-
-### 2. Connect WebhookInput Nodes
-
-Use the various `WebhookInput` nodes to extract specific variables:
-
-- `WebhookTextInput` - Extract text strings
-- `WebhookIntInput` - Extract integers (seeds, steps, etc.)
-- `WebhookFloatInput` - Extract floats (cfg, denoise, etc.)
-- `WebhookBoolInput` - Extract booleans
-- `WebhookImageInput` - Extract images (base64 or URL)
-- `WebhookImagesInput` - Extract multiple images as a batch
-- `WebhookAudioInput` - Extract audio (base64 or URL)
-- `WebhookMaskInput` - Extract masks
-- `WebhookJSONInput` - Extract JSON data as string
-
-### 3. Connect to Regular Workflow Nodes
-
-Connect the outputs to your regular ComfyUI nodes (KSampler, VAE Decode, etc.).
-
-### 4. Use Standard Output Nodes
-
-**Important**: You don't need special output nodes! The webhook system automatically intercepts outputs from standard nodes like `SaveImage`, `SaveAudio`, etc.
-
-### 5. Submit via API
+**No workflow changes needed!** Just add `webhook_config` to any existing workflow:
 
 ```json
 POST /prompt
 {
-  "prompt": { /* your workflow JSON */ },
+  "prompt": { /* your existing workflow JSON - no changes needed */ },
   "extra_data": {
     "webhook_config": {
-      "callback_url": "https://api.example.com/webhook",
+      "callback_url": "https://your-server.com/webhook",
       "auth_header": "Authorization",
-      "auth_value": "Bearer your-token-here",
-      "request_id": "req_abc123",
-      "send_progress": true
+      "auth_value": "Bearer your-token"
+    }
+  }
+}
+```
+
+That's it! When the workflow completes, all outputs (images, audio, video, etc.) are automatically sent to your webhook URL as a multipart request.
+
+**How it works:**
+1. The webhook interceptor hooks into ComfyUI's execution system
+2. When any workflow with `webhook_config` completes, outputs are captured
+3. All output files are sent via multipart POST to your `callback_url`
+4. Works with SaveImage, SaveAudio, Preview nodes, custom nodes - everything!
+
+### Option 2: With Dynamic Inputs
+
+For workflows that need dynamic inputs (prompts, seeds, images from API):
+
+**1. Add WebhookReceiver node to your workflow**
+
+The `WebhookReceiver` node extracts configuration and input variables from the API request.
+
+**2. Connect WebhookInput nodes for each dynamic value:**
+
+- `WebhookTextInput` - Extract text strings (prompts)
+- `WebhookIntInput` - Extract integers (seeds, steps)
+- `WebhookFloatInput` - Extract floats (cfg, denoise)
+- `WebhookImageInput` - Extract images (base64 or URL)
+- `WebhookAudioInput` - Extract audio
+- And more...
+
+**3. Submit via API with inputs:**
+
+```json
+POST /prompt
+{
+  "prompt": { /* workflow with WebhookReceiver and WebhookInput nodes */ },
+  "extra_data": {
+    "webhook_config": {
+      "callback_url": "https://your-server.com/webhook"
     },
     "webhook_inputs": {
-      "prompt": "a beautiful sunset over mountains, 8k, detailed",
+      "prompt": "a beautiful sunset over mountains, 8k",
       "negative": "blurry, low quality",
       "seed": 42,
       "cfg": 7.5,
-      "steps": 30,
-      "image": "data:image/png;base64,iVBORw0KGgo...",
-      "use_hires": true
+      "image": "data:image/png;base64,iVBORw0KGgo..."
     }
   }
 }
@@ -84,14 +96,14 @@ POST /prompt
 | `request_id` | string | auto-generated | Unique identifier for this request |
 | `auth_header` | string | null | Header name for authentication |
 | `auth_value` | string | null | Header value for authentication |
+| `headers` | object | null | Additional custom headers |
 | `send_progress` | boolean | true | Send progress events during execution |
-| `progress_interval_ms` | integer | 1000 | Minimum interval between progress events |
 | `timeout_seconds` | integer | 60 | Request timeout for webhook calls |
 | `max_retries` | integer | 3 | Maximum retry attempts on failure |
 
 ### webhook_inputs
 
-A dictionary of input values that can be extracted using WebhookInput nodes:
+A dictionary of input values for WebhookInput nodes:
 
 ```json
 {
@@ -111,37 +123,9 @@ A dictionary of input values that can be extracted using WebhookInput nodes:
 
 ## Webhook Events
 
-### workflow.started
-Sent when execution begins.
+### workflow.completed (Multipart)
 
-```json
-{
-  "event": "workflow.started",
-  "request_id": "req_abc123",
-  "prompt_id": "comfy_12345",
-  "timestamp": "2024-01-15T10:30:00.000Z"
-}
-```
-
-### workflow.progress
-Sent during execution (if enabled).
-
-```json
-{
-  "event": "workflow.progress",
-  "request_id": "req_abc123",
-  "prompt_id": "comfy_12345",
-  "timestamp": "2024-01-15T10:30:00.000Z",
-  "node_id": "7",
-  "node_type": "KSampler",
-  "progress": 0.45,
-  "message": "Sampling step 9/20",
-  "elapsed_ms": 5234
-}
-```
-
-### output.batch (Multipart)
-Sent as multipart/form-data when execution completes:
+Sent as multipart/form-data when execution completes successfully:
 
 ```
 Content-Type: multipart/form-data; boundary=----WebhookBoundary
@@ -151,11 +135,13 @@ Content-Disposition: form-data; name="metadata"
 Content-Type: application/json
 
 {
-  "event": "output.batch",
+  "event": "workflow.completed",
   "request_id": "req_abc123",
   "prompt_id": "comfy_12345",
   "timestamp": "2024-01-15T10:30:10.000Z",
   "status": "success",
+  "output_count": 1,
+  "file_count": 1,
   "outputs": [
     {
       "type": "image",
@@ -168,7 +154,8 @@ Content-Type: application/json
       "node_type": "SaveImage"
     }
   ],
-  "execution_time_ms": 12345
+  "execution_time_ms": 12345,
+  "nodes_executed": 5
 }
 ------WebhookBoundary
 Content-Disposition: form-data; name="file_0"; filename="ComfyUI_00001_.png"
@@ -179,7 +166,8 @@ Content-Type: image/png
 ```
 
 ### workflow.error
-Sent if execution fails.
+
+Sent if execution fails:
 
 ```json
 {
@@ -187,14 +175,77 @@ Sent if execution fails.
   "request_id": "req_abc123",
   "prompt_id": "comfy_12345",
   "timestamp": "2024-01-15T10:30:00.000Z",
-  "error": {
-    "type": "execution_error",
-    "message": "CUDA out of memory",
-    "node_id": "7",
-    "node_type": "KSampler"
-  },
+  "status": "error",
+  "messages": [
+    {"type": "execution_error", "message": "CUDA out of memory", "node_id": "7"}
+  ],
   "elapsed_ms": 5234
 }
+```
+
+### workflow.started
+
+Sent when execution begins (only when using WebhookReceiver node):
+
+```json
+{
+  "event": "workflow.started",
+  "request_id": "req_abc123",
+  "prompt_id": "comfy_12345",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+### workflow.progress
+
+Sent during execution (if enabled, only with WebhookReceiver):
+
+```json
+{
+  "event": "workflow.progress",
+  "request_id": "req_abc123",
+  "prompt_id": "comfy_12345",
+  "node_id": "7",
+  "node_type": "KSampler",
+  "progress": 0.45,
+  "message": "Sampling step 9/20",
+  "elapsed_ms": 5234
+}
+```
+
+## Example Webhook Receiver (Python/FastAPI)
+
+```python
+from fastapi import FastAPI, Request
+import json
+
+app = FastAPI()
+
+@app.post("/webhook")
+async def receive_webhook(request: Request):
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        # Parse multipart (workflow completed with outputs)
+        form = await request.form()
+        metadata = json.loads(form["metadata"])
+
+        print(f"Received {metadata['event']}: {metadata['output_count']} outputs")
+
+        # Process each file
+        for key, value in form.items():
+            if key.startswith("file_"):
+                content = await value.read()
+                filename = value.filename
+                print(f"  File: {filename} ({len(content)} bytes)")
+                # Save or process file...
+
+        return {"status": "received", "outputs": metadata["output_count"]}
+    else:
+        # JSON event (started, progress, error)
+        data = await request.json()
+        print(f"Received {data['event']}")
+        return {"status": "received", "event": data["event"]}
 ```
 
 ## Nodes Reference
@@ -202,7 +253,7 @@ Sent if execution fails.
 ### Entry Point
 - **Webhook Receiver** - Main entry point, extracts config and inputs
 
-### Input Nodes
+### Input Nodes (for dynamic workflows)
 - **Webhook Text Input** - Extract text string
 - **Webhook Texts Input (List)** - Extract list of strings
 - **Webhook Int Input** - Extract integer
@@ -216,43 +267,27 @@ Sent if execution fails.
 - **Webhook JSON Input** - Extract JSON as string
 - **Webhook Any Input** - Extract any type
 
-### Output Nodes
+### Output Nodes (optional, for manual control)
 - **Webhook Send** - Manually send data to webhook
 - **Webhook Send JSON** - Send JSON data to webhook
 
 ### Debug
 - **Webhook Debug Info** - Display webhook context information
 
-## Example Receiver (Python/FastAPI)
+## Supported Output Types
 
-```python
-from fastapi import FastAPI, Request, UploadFile, Form
-import json
+The webhook system automatically detects and handles:
 
-app = FastAPI()
+| Type | Extensions | Detected From |
+|------|------------|---------------|
+| Image | png, jpg, webp, gif | SaveImage, PreviewImage |
+| Audio | flac, wav, mp3, ogg | SaveAudio |
+| Video | mp4, webm, mov | VHS nodes, custom video nodes |
+| 3D Mesh | glb, gltf, obj | 3D preview nodes |
+| Text | - | ShowText, any text output |
+| Latent | safetensors | SaveLatent |
 
-@app.post("/webhook")
-async def receive_webhook(request: Request):
-    content_type = request.headers.get("content-type", "")
-
-    if "multipart/form-data" in content_type:
-        # Parse multipart
-        form = await request.form()
-        metadata = json.loads(form["metadata"])
-
-        # Process files
-        for key, value in form.items():
-            if key.startswith("file_"):
-                # value is an UploadFile
-                content = await value.read()
-                # Save or process file...
-
-        return {"status": "received", "event": metadata["event"]}
-    else:
-        # JSON event
-        data = await request.json()
-        return {"status": "received", "event": data["event"]}
-```
+**Custom nodes are supported!** Any node that outputs to the `ui` dict with standard patterns will be detected.
 
 ## Development
 
@@ -260,42 +295,62 @@ async def receive_webhook(request: Request):
 
 ```bash
 cd comfy-http-webhook
-pip install pytest pytest-asyncio
-pytest tests/ -v
+python run_tests.py
 ```
 
 ### Project Structure
 
 ```
 comfy-http-webhook/
-├── __init__.py              # Node registration
-├── PLAN.md                  # Architecture documentation
-├── TODOs.md                 # Implementation checklist
+├── __init__.py              # Node registration & interceptor init
+├── run_tests.py             # Test runner
 ├── README.md                # This file
 ├── requirements.txt         # Dependencies
 ├── core/
-│   ├── types.py             # Data types
-│   ├── client.py            # HTTP client
-│   ├── context.py           # Context management
-│   └── interceptor.py       # Output interception
+│   ├── types.py             # Data types (WebhookContext, OutputInfo)
+│   ├── client.py            # Async HTTP client with retry logic
+│   ├── context.py           # Thread-safe context registry
+│   └── interceptor.py       # Output interception (zero-config magic)
 ├── nodes/
 │   ├── receiver.py          # WebhookReceiver node
-│   ├── inputs.py            # Input nodes
-│   └── send.py              # Output nodes
+│   ├── inputs.py            # All input extraction nodes
+│   └── send.py              # Manual output nodes
 ├── processors/
-│   ├── inputs.py            # Input processing
-│   └── outputs.py           # Output detection
+│   ├── inputs.py            # Base64/URL decoding
+│   └── outputs.py           # Output type detection
 ├── utils/
-│   ├── mime.py              # MIME utilities
-│   └── validation.py        # Validation utilities
+│   ├── mime.py              # MIME type utilities
+│   └── validation.py        # URL and data validation
 └── tests/
     └── ...                  # Test files
 ```
 
-## Documentation
+## How Zero-Config Works
 
-- [Architecture & Design](./PLAN.md) - Detailed system design
-- [Implementation Checklist](./TODOs.md) - Feature checklist
+The magic happens in `core/interceptor.py`:
+
+1. **On module load**: Hooks into `PromptQueue.task_done()` method
+2. **On workflow complete**: Checks if `extra_data` contains `webhook_config`
+3. **If webhook configured**: Extracts all outputs from `history_result`
+4. **Sends multipart POST**: Metadata JSON + all output files
+5. **Background thread**: Non-blocking delivery with retry logic
+
+This means ANY workflow works - no modifications needed!
+
+## Troubleshooting
+
+### Webhook not receiving data?
+
+1. Check ComfyUI logs for webhook delivery messages
+2. Verify `callback_url` is accessible from ComfyUI server
+3. Check authentication headers are correct
+4. Look for error events in your webhook endpoint
+
+### Files not included in webhook?
+
+1. Ensure output nodes are configured to save files (not just preview)
+2. Check that files exist in output directory after workflow completes
+3. Verify file permissions allow reading
 
 ## License
 
